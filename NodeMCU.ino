@@ -1,5 +1,6 @@
 #include <ESP8266WiFi.h>
 
+/* --- Configuration --- */
 const char* ssid = "Telecom_Network";
 const char* password = "telecom123";
 
@@ -7,281 +8,179 @@ WiFiServer server(80);
 const IPAddress apIP(192, 168, 4, 1);
 const IPAddress apGateway(192, 168, 4, 1);
 const IPAddress apSubnet(255, 255, 255, 0);
-const unsigned long apHealthCheckIntervalMs = 5000;
-unsigned long lastApHealthCheck = 0;
 
-// LED Pins
-int Ag = D1, Ay = D2, Ar = D3;
-int Bg = D4, By = D5, Br = D6;
-int Cg = D7, Cy = D8, Cr = D0;
+/* --- Pin Definitions --- */
+// Tower A
+const int Ag = D1, Ay = D2, Ar = D3;
+// Tower B
+const int Bg = D4, By = D5, Br = D6;
+// Tower C
+const int Cg = D7, Cy = D8, Cr = D0;
 
-// Tower loads
+/* --- Variables --- */
 int towerA = 0, towerB = 0, towerC = 0;
-
 bool autoMode = true;
 unsigned long lastAutoUpdate = 0;
 const unsigned long autoUpdateIntervalMs = 4000;
 
-// -------- Utility --------
-int clampUsers(int users)
-{
-  return constrain(users, 0, 9);
+/* --- Logic Functions --- */
+int clampUsers(int users) { 
+  return constrain(users, 0, 9); 
 }
 
-int parseTowerValue(const String& req, const String& key, int fallback)
-{
+int parseTowerValue(const String& req, const String& key, int fallback) {
   int start = req.indexOf(key);
   if (start == -1) return fallback;
-
   start += key.length();
   int end = req.indexOf('&', start);
   if (end == -1) end = req.indexOf(' ', start);
-  if (end == -1) end = req.length();
-
   return clampUsers(req.substring(start, end).toInt());
 }
 
-String readHttpRequest(WiFiClient& client)
-{
-  String req = "";
-  unsigned long start = millis();
-
-  while (client.connected() && millis() - start < 1000)
-  {
-    while (client.available())
-    {
-      char c = client.read();
-      req += c;
-
-      if (req.endsWith("\r\n\r\n"))
-        return req;
-    }
-    delay(1);
-  }
-  return req;
+void setTower(int users, int g, int y, int r) {
+  digitalWrite(g, users <= 3 ? HIGH : LOW);
+  digitalWrite(y, (users > 3 && users <= 6) ? HIGH : LOW);
+  digitalWrite(r, users > 6 ? HIGH : LOW);
 }
 
-// -------- Core Logic --------
-void setTower(int users, int g, int y, int r)
-{
-  digitalWrite(g, LOW);
-  digitalWrite(y, LOW);
-  digitalWrite(r, LOW);
-
-  if (users <= 3) digitalWrite(g, HIGH);
-  else if (users <= 6) digitalWrite(y, HIGH);
-  else digitalWrite(r, HIGH);
-}
-
-void balanceLoad()
-{
-  while (towerA > 6 || towerB > 6 || towerC > 6)
-  {
-    if (towerA > 6)
-    {
-      towerA--;
-      (towerB < towerC) ? towerB++ : towerC++;
-    }
-    if (towerB > 6)
-    {
-      towerB--;
-      (towerA < towerC) ? towerA++ : towerC++;
-    }
-    if (towerC > 6)
-    {
-      towerC--;
-      (towerA < towerB) ? towerA++ : towerB++;
-    }
+void balanceLoad() {
+  int maxLoad = max(towerA, max(towerB, towerC));
+  if (maxLoad <= 6) return; // No balancing needed if no tower is "Red"
+  
+  int excess = maxLoad - 6;
+  if (towerA == maxLoad) {
+    towerA -= excess;
+    towerB += excess / 2;
+    towerC += excess - (excess / 2);
+  } else if (towerB == maxLoad) {
+    towerB -= excess;
+    towerA += excess / 2;
+    towerC += excess - (excess / 2);
+  } else {
+    towerC -= excess;
+    towerA += excess / 2;
+    towerB += excess - (excess / 2);
   }
 }
 
-void simulateTraffic()
-{
-  towerA = random(0, 10);
-  towerB = random(0, 10);
-  towerC = random(0, 10);
+void simulateTraffic() {
+  towerA = random(1, 10);
+  towerB = random(1, 10);
+  towerC = random(1, 10);
 }
 
-void applyTowerOutputs()
-{
+void applyTowerOutputs() {
   setTower(towerA, Ag, Ay, Ar);
   setTower(towerB, Bg, By, Br);
   setTower(towerC, Cg, Cy, Cr);
 }
 
-void updateAutomaticMode(bool force = false)
-{
-  if (!autoMode) return;
-
+void updateAutomaticMode(bool force = false) {
+  if (!autoMode && !force) return;
   unsigned long now = millis();
-  if (force || now - lastAutoUpdate >= autoUpdateIntervalMs)
-  {
+  if (force || now - lastAutoUpdate >= autoUpdateIntervalMs) {
     simulateTraffic();
     balanceLoad();
     lastAutoUpdate = now;
+    applyTowerOutputs();
   }
 }
 
-bool startSoftAP()
-{
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_AP);
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
-
-  bool configured = WiFi.softAPConfig(apIP, apGateway, apSubnet);
-  bool started = WiFi.softAP(ssid, password);
-
-  Serial.print("AP config status: ");
-  Serial.println(configured ? "OK" : "FAILED");
-  Serial.print("AP start status: ");
-  Serial.println(started ? "OK" : "FAILED");
-  Serial.print("AP IP: ");
-  Serial.println(WiFi.softAPIP());
-
-  return configured && started;
-}
-
-void ensureSoftAPRunning()
-{
-  unsigned long now = millis();
-  if (now - lastApHealthCheck < apHealthCheckIntervalMs) return;
-
-  lastApHealthCheck = now;
-  if (WiFi.getMode() != WIFI_AP || WiFi.softAPIP() != apIP)
-  {
-    Serial.println("SoftAP stopped responding. Restarting Wi-Fi AP...");
-    startSoftAP();
-    server.begin();
-  }
-}
-
-// -------- Setup --------
-void setup()
-{
-  Serial.begin(115200);
-
-  pinMode(Ag, OUTPUT); pinMode(Ay, OUTPUT); pinMode(Ar, OUTPUT);
-  pinMode(Bg, OUTPUT); pinMode(By, OUTPUT); pinMode(Br, OUTPUT);
-  pinMode(Cg, OUTPUT); pinMode(Cy, OUTPUT); pinMode(Cr, OUTPUT);
-
-  randomSeed(analogRead(A0));
-
-  startSoftAP();
-
-  updateAutomaticMode(true);
-  applyTowerOutputs();
-
-  server.begin();
-}
-
-// -------- Loop --------
-void loop()
-{
-  ensureSoftAPRunning();
-  updateAutomaticMode();
-  applyTowerOutputs();
-
-  WiFiClient client = server.available();
-  if (!client) return;
-
-  String req = readHttpRequest(client);
-  if (req.length() == 0)
-  {
-    client.stop();
-    return;
-  }
-
-  // -------- AJAX ENDPOINT --------
-  if (req.indexOf("GET /data") != -1)
-  {
-    if (req.indexOf("mode=manual") != -1) autoMode = false;
-
-    if (req.indexOf("mode=auto") != -1)
-    {
-      autoMode = true;
-      updateAutomaticMode(true);
+/* --- Web Server --- */
+void handleClient(WiFiClient client) {
+  String req = "";
+  unsigned long timeout = millis();
+  // Read request
+  while (client.connected() && millis() - timeout < 1000) {
+    if (client.available()) {
+      char c = client.read();
+      req += c;
+      if (req.endsWith("\r\n\r\n")) break;
     }
+  }
 
-    if (!autoMode)
-    {
+  if (req.indexOf("GET /data") != -1) {
+    // Handle AJAX Data Requests
+    if (req.indexOf("mode=manual") != -1) autoMode = false;
+    if (req.indexOf("mode=auto") != -1) { 
+      autoMode = true; 
+      updateAutomaticMode(true); 
+    }
+    if (!autoMode && req.indexOf("A=") != -1) {
       towerA = parseTowerValue(req, "A=", towerA);
       towerB = parseTowerValue(req, "B=", towerB);
       towerC = parseTowerValue(req, "C=", towerC);
       balanceLoad();
+      applyTowerOutputs();
     }
+    
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n");
+    client.printf("{\"A\":%d,\"B\":%d,\"C\":%d,\"mode\":\"%s\"}", 
+                  towerA, towerB, towerC, autoMode ? "auto" : "manual");
+  } 
+  else {
+    // Send Main HTML Page
+    client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n");
+    client.println(F("<!DOCTYPE html><html><head><title>Telecom Control</title>"));
+    client.println(F("<meta name='viewport' content='width=device-width, initial-scale=1'>"));
+    client.println(F("<style>body{background:#020617;color:#e2e8f0;font-family:sans-serif;text-align:center}"));
+    client.println(F(".panel{background:#0f172a;padding:15px;margin:10px auto;border-radius:10px;max-width:400px}"));
+    client.println(F(".bar{height:20px;background:#22c55e;border-radius:10px;transition:0.5s;width:0%}"));
+    client.println(F("button{padding:10px 20px;margin:5px;background:#2563eb;color:white;border:none;border-radius:5px;cursor:pointer}"));
+    client.println(F("input{width:50px;padding:8px;border-radius:5px;border:none;margin:5px}</style></head><body>"));
+    client.println(F("<h1>Telecom Load Balancer</h1><p id='modeText'>Loading...</p>"));
+    client.println(F("<button onclick=\"setMode('auto')\">Auto Mode</button>"));
+    client.println(F("<button onclick=\"setMode('manual')\">Manual Mode</button>"));
+    client.println(F("<div class='panel'><h3>Manual Input</h3>"));
+    client.println(F("A <input id='A' type='number' min='0' max='9'> "));
+    client.println(F("B <input id='B' type='number' min='0' max='9'> "));
+    client.println(F("C <input id='C' type='number' min='0' max='9'>"));
+    client.println(F("<br><button onclick='updateManual()'>Apply & Balance</button></div>"));
+    client.println(F("<div class='panel'>Tower A: <span id='valA'>0</span>/9<div class='bar' id='barA'></div></div>"));
+    client.println(F("<div class='panel'>Tower B: <span id='valB'>0</span>/9<div class='bar' id='barB'></div></div>"));
+    client.println(F("<div class='panel'>Tower C: <span id='valC'>0</span>/9<div class='bar' id='barC'></div></div>"));
+    client.println(F("<script>function updateUI(d){"));
+    client.println(F("document.getElementById('valA').innerText=d.A;document.getElementById('valB').innerText=d.B;document.getElementById('valC').innerText=d.C;"));
+    client.println(F("document.getElementById('barA').style.width=(d.A*11.1)+'%';document.getElementById('barB').style.width=(d.B*11.1)+'%';document.getElementById('barC').style.width=(d.C*11.1)+'%';"));
+    client.println(F("document.getElementById('modeText').innerText='Current Mode: '+d.mode.toUpperCase();}"));
+    client.println(F("function fetchData(){fetch('/data').then(r=>r.json()).then(updateUI);}"));
+    client.println(F("function setMode(m){fetch('/data?mode='+m).then(fetchData);}"));
+    client.println(F("function updateManual(){let a=document.getElementById('A').value, b=document.getElementById('B').value, c=document.getElementById('C').value;"));
+    client.println(F("fetch(`/data?mode=manual&A=${a}&B=${b}&C=${c}`).then(fetchData);}"));
+    client.println(F("setInterval(fetchData,3000);fetchData();</script></body></html>"));
+  }
+  delay(1);
+  client.stop();
+}
 
-    applyTowerOutputs();
-
-    client.println("HTTP/1.1 200 OK");
-    client.println("Content-Type: application/json");
-    client.println("Connection: close");
-    client.println();
-
-    client.print("{\"A\":"); client.print(towerA);
-    client.print(",\"B\":"); client.print(towerB);
-    client.print(",\"C\":"); client.print(towerC);
-    client.print(",\"mode\":\""); client.print(autoMode ? "auto" : "manual"); client.print("\"}");
-
-    delay(5);
-    client.stop();
-    return;
+/* --- Core Setup & Loop --- */
+void setup() {
+  Serial.begin(115200);
+  
+  // Set all pins as output
+  int pins[] = {Ag, Ay, Ar, Bg, By, Br, Cg, Cy, Cr};
+  for (int i = 0; i < 9; i++) {
+    pinMode(pins[i], OUTPUT);
+    digitalWrite(pins[i], LOW);
   }
 
-  // -------- WEB PAGE --------
-  client.println("HTTP/1.1 200 OK");
-  client.println("Content-Type: text/html");
-  client.println("Connection: close");
-  client.println();
+  randomSeed(analogRead(A0));
+  
+  // Start Access Point
+  WiFi.softAPConfig(apIP, apGateway, apSubnet);
+  WiFi.softAP(ssid, password);
+  
+  server.begin();
+  Serial.println("Server Started. Connect to: " + String(ssid));
+  
+  updateAutomaticMode(true); // Initial state
+}
 
-  client.println("<!DOCTYPE html><html><head>");
-  client.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
-
-  client.println("<style>");
-  client.println("body{background:#020617;color:#e2e8f0;font-family:Arial;text-align:center}");
-  client.println(".panel{background:#0f172a;padding:15px;margin:10px;border-radius:10px}");
-  client.println(".bar{height:20px;background:#22c55e;border-radius:10px;margin-top:5px}");
-  client.println("button{padding:10px;margin:5px;background:#2563eb;color:white;border:none}");
-  client.println("input{padding:6px;margin:5px}");
-  client.println("</style>");
-
-  client.println("</head><body>");
-
-  client.println("<h1>Telecom Control</h1>");
-  client.println("<p id='modeText'></p>");
-
-  client.println("<button onclick=\"setMode('auto')\">Auto</button>");
-  client.println("<button onclick=\"setMode('manual')\">Manual</button>");
-
-  client.println("<div>");
-  client.println("A <input id='A' type='number'>");
-  client.println("B <input id='B' type='number'>");
-  client.println("C <input id='C' type='number'>");
-  client.println("<button onclick='updateManual()'>Update</button>");
-  client.println("</div>");
-
-  client.println("<div class='panel'>A <span id='valA'></span><div class='bar' id='barA'></div></div>");
-  client.println("<div class='panel'>B <span id='valB'></span><div class='bar' id='barB'></div></div>");
-  client.println("<div class='panel'>C <span id='valC'></span><div class='bar' id='barC'></div></div>");
-
-  client.println("<script>");
-  client.println("function updateUI(d){");
-  client.println("valA.innerText=d.A; valB.innerText=d.B; valC.innerText=d.C;");
-  client.println("A.value=d.A; B.value=d.B; C.value=d.C;");
-  client.println("barA.style.width=(d.A*20)+'px';");
-  client.println("barB.style.width=(d.B*20)+'px';");
-  client.println("barC.style.width=(d.C*20)+'px';");
-  client.println("modeText.innerText='Mode: '+d.mode;");
-  client.println("}");
-
-  client.println("function fetchData(){fetch('/data').then(r=>r.json()).then(updateUI);}");  
-  client.println("function setMode(m){fetch('/data?mode='+m).then(fetchData);}");  
-  client.println("function updateManual(){fetch(`/data?mode=manual&A=${A.value}&B=${B.value}&C=${C.value}`).then(fetchData);}");  
-
-  client.println("setInterval(fetchData,3000); fetchData();");
-  client.println("</script>");
-
-  client.println("</body></html>");
-
-  delay(5);
-  client.stop();
+void loop() {
+  updateAutomaticMode();
+  
+  WiFiClient client = server.available();
+  if (client) {
+    handleClient(client);
+  }
 }
