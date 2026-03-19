@@ -4,6 +4,11 @@ const char* ssid = "Telecom_Network";
 const char* password = "telecom123";
 
 WiFiServer server(80);
+const IPAddress apIP(192, 168, 4, 1);
+const IPAddress apGateway(192, 168, 4, 1);
+const IPAddress apSubnet(255, 255, 255, 0);
+const unsigned long apHealthCheckIntervalMs = 5000;
+unsigned long lastApHealthCheck = 0;
 
 // LED Pins
 int Ag = D1, Ay = D2, Ar = D3;
@@ -117,6 +122,39 @@ void updateAutomaticMode(bool force = false)
   }
 }
 
+bool startSoftAP()
+{
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_AP);
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+
+  bool configured = WiFi.softAPConfig(apIP, apGateway, apSubnet);
+  bool started = WiFi.softAP(ssid, password);
+
+  Serial.print("AP config status: ");
+  Serial.println(configured ? "OK" : "FAILED");
+  Serial.print("AP start status: ");
+  Serial.println(started ? "OK" : "FAILED");
+  Serial.print("AP IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  return configured && started;
+}
+
+void ensureSoftAPRunning()
+{
+  unsigned long now = millis();
+  if (now - lastApHealthCheck < apHealthCheckIntervalMs) return;
+
+  lastApHealthCheck = now;
+  if (WiFi.getMode() != WIFI_AP || WiFi.softAPIP() != apIP)
+  {
+    Serial.println("SoftAP stopped responding. Restarting Wi-Fi AP...");
+    startSoftAP();
+    server.begin();
+  }
+}
+
 // -------- Setup --------
 void setup()
 {
@@ -126,13 +164,9 @@ void setup()
   pinMode(Bg, OUTPUT); pinMode(By, OUTPUT); pinMode(Br, OUTPUT);
   pinMode(Cg, OUTPUT); pinMode(Cy, OUTPUT); pinMode(Cr, OUTPUT);
 
-  randomSeed(analogRead(0));
+  randomSeed(analogRead(A0));
 
-  WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
-  WiFi.softAP(ssid, password);
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
-
-  Serial.println(WiFi.softAPIP());
+  startSoftAP();
 
   updateAutomaticMode(true);
   applyTowerOutputs();
@@ -143,6 +177,7 @@ void setup()
 // -------- Loop --------
 void loop()
 {
+  ensureSoftAPRunning();
   updateAutomaticMode();
   applyTowerOutputs();
 
