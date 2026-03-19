@@ -20,6 +20,8 @@ int towerB = 0;
 int towerC = 0;
 
 bool autoMode = true;
+unsigned long lastAutoUpdate = 0;
+const unsigned long autoUpdateIntervalMs = 4000;
 
 int clampUsers(int users)
 {
@@ -98,6 +100,30 @@ void simulateTraffic()
   towerC = random(0, 10);
 }
 
+void applyTowerOutputs()
+{
+  setTower(towerA, Ag, Ay, Ar);
+  setTower(towerB, Bg, By, Br);
+  setTower(towerC, Cg, Cy, Cr);
+}
+
+void updateAutomaticMode(bool forceUpdate = false)
+{
+  if (!autoMode)
+  {
+    return;
+  }
+
+  unsigned long now = millis();
+
+  if (forceUpdate || now - lastAutoUpdate >= autoUpdateIntervalMs)
+  {
+    simulateTraffic();
+    balanceLoad();
+    lastAutoUpdate = now;
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -116,95 +142,151 @@ void setup()
 
   randomSeed(analogRead(0));
 
+  WiFi.softAPConfig(IPAddress(192,168,4,1), IPAddress(192,168,4,1), IPAddress(255,255,255,0));
   WiFi.softAP(ssid, password);
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
 
   Serial.println("Network Started");
   Serial.println(WiFi.softAPIP());
+
+  updateAutomaticMode(true);
+  applyTowerOutputs();
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
 
   server.begin();
 }
 
 void loop()
 {
-  if (autoMode)
-  {
-    simulateTraffic();
-    balanceLoad();
-    delay(4000);
-  }
-
-  setTower(towerA, Ag, Ay, Ar);
-  setTower(towerB, Bg, By, Br);
-  setTower(towerC, Cg, Cy, Cr);
+  updateAutomaticMode();
+  applyTowerOutputs();
 
   WiFiClient client = server.available();
 
   if (!client) return;
 
-  String req = client.readStringUntil('\r');
-  client.flush();
+  String req = "";
 
+if (req.indexOf("GET /data") != -1)
+{
   if (req.indexOf("mode=manual") != -1) autoMode = false;
-  if (req.indexOf("mode=auto") != -1) autoMode = true;
+  if (req.indexOf("mode=auto") != -1)
+  {
+    autoMode = true;
+    updateAutomaticMode(true);
+  }
 
-  towerA = parseTowerValue(req, "A=", towerA);
-  towerB = parseTowerValue(req, "B=", towerB);
-  towerC = parseTowerValue(req, "C=", towerC);
+  if (!autoMode)
+  {
+    towerA = parseTowerValue(req, "A=", towerA);
+    towerB = parseTowerValue(req, "B=", towerB);
+    towerC = parseTowerValue(req, "C=", towerC);
+    balanceLoad();
+  }
 
-  balanceLoad();
+  applyTowerOutputs();
 
   client.println("HTTP/1.1 200 OK");
-  client.println("Content-type:text/html");
-  client.println("");
+  client.println("Content-Type: application/json");
+  client.println("Connection: close");
+  client.println();
 
-  client.println("<html>");
-  client.println("<head>");
-  client.println("<meta name='viewport' content='width=device-width, initial-scale=1'>");
-  client.println("<title>Telecom Network Control</title>");
-  client.println("<style>");
-  client.println("body{background:#020617;color:#e2e8f0;font-family:Arial,sans-serif;text-align:center;margin:0;padding:24px}");
-  client.println(".panel{background:#0f172a;padding:20px;margin:20px auto;border-radius:12px;max-width:420px}");
-  client.println(".bar{height:20px;background:#22c55e;margin-top:10px;border-radius:999px}");
-  client.println(".mode{margin-bottom:24px}");
-  client.println(".box{margin:12px 0}");
-  client.println("input{padding:8px 10px;border-radius:6px;border:1px solid #334155;background:#020617;color:#e2e8f0}");
-  client.println("button{padding:12px 20px;font-size:18px;background:#2563eb;color:white;border:none;border-radius:6px;cursor:pointer;margin:6px}");
-  client.println("button:hover{background:#1d4ed8}");
-  client.println("</style>");
-  client.println("</head>");
+  client.print("{");
+  client.print("\"A\":"); client.print(towerA); client.print(",");
+  client.print("\"B\":"); client.print(towerB); client.print(",");
+  client.print("\"C\":"); client.print(towerC); client.print(",");
+  client.print("\"mode\":\""); client.print(autoMode ? "auto" : "manual"); client.print("\"");
+  client.print("}");
+
+  delay(1);
+  client.stop();
+  return;
+}
+
+  if (req.indexOf("mode=manual") != -1)
+  {
+    autoMode = false;
+  }
+
+    if (req.indexOf("mode=auto") != -1)
+  {
+    autoMode = true;
+    updateAutomaticMode(true);
+  }
+
+  if (!autoMode)
+  {
+    towerA = parseTowerValue(req, "A=", towerA);
+    towerB = parseTowerValue(req, "B=", towerB);
+    towerC = parseTowerValue(req, "C=", towerC);
+    balanceLoad();
+  }
+
+  applyTowerOutputs();
+
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println("Connection: close");
+  client.println("Cache-Control: no-cache, no-store, must-revalidate");
+  client.println("Pragma: no-cache");
+  client.println("Expires: 0");
+  client.println();
+
   client.println("<body>");
+client.println("<h1>Telecom Network Control</h1>");
 
-  client.println("<h1>Telecom Network Control</h1>");
-  client.print("<p>Mode: ");
-  client.print(autoMode ? "Automatic" : "Manual");
-  client.println("</p>");
+client.println("<p id='modeText'></p>");
 
-  client.println("<div class='mode'>");
-  client.println("<a href='/?mode=auto'><button>Automatic Mode</button></a>");
-  client.println("<a href='/?mode=manual'><button>Manual Mode</button></a>");
-  client.println("</div>");
+client.println("<div class='mode'>");
+client.println("<button onclick=\"setMode('auto')\">Automatic</button>");
+client.println("<button onclick=\"setMode('manual')\">Manual</button>");
+client.println("</div>");
 
-  client.println("<form>");
-  client.println("<div class='box'>Tower A Users <input name='A' min='0' max='9' type='number'></div>");
-  client.println("<div class='box'>Tower B Users <input name='B' min='0' max='9' type='number'></div>");
-  client.println("<div class='box'>Tower C Users <input name='C' min='0' max='9' type='number'></div>");
-  client.println("<button type='submit'>Update</button>");
-  client.println("</form>");
+client.println("<div class='box'>Tower A <input id='A' type='number' min='0' max='9'></div>");
+client.println("<div class='box'>Tower B <input id='B' type='number' min='0' max='9'></div>");
+client.println("<div class='box'>Tower C <input id='C' type='number' min='0' max='9'></div>");
+client.println("<button onclick='updateManual()'>Update</button>");
 
-  client.print("<div class='panel'>Tower A Users: ");
-  client.print(towerA);
-  client.println("<div class='bar' style='width:" + String(towerA * 20) + "px'></div></div>");
+client.println("<div class='panel'>A: <span id='valA'></span><div class='bar' id='barA'></div></div>");
+client.println("<div class='panel'>B: <span id='valB'></span><div class='bar' id='barB'></div></div>");
+client.println("<div class='panel'>C: <span id='valC'></span><div class='bar' id='barC'></div></div>");
 
-  client.print("<div class='panel'>Tower B Users: ");
-  client.print(towerB);
-  client.println("<div class='bar' style='width:" + String(towerB * 20) + "px'></div></div>");
+client.println("<script>");
 
-  client.print("<div class='panel'>Tower C Users: ");
-  client.print(towerC);
-  client.println("<div class='bar' style='width:" + String(towerC * 20) + "px'></div></div>");
+client.println("function updateUI(data){");
+client.println("document.getElementById('valA').innerText=data.A;");
+client.println("document.getElementById('valB').innerText=data.B;");
+client.println("document.getElementById('valC').innerText=data.C;");
 
-  client.println("</body>");
-  client.println("</html>");
+client.println("document.getElementById('barA').style.width=(data.A*20)+'px';");
+client.println("document.getElementById('barB').style.width=(data.B*20)+'px';");
+client.println("document.getElementById('barC').style.width=(data.C*20)+'px';");
 
+client.println("document.getElementById('modeText').innerText='Mode: '+data.mode;");
+client.println("}");
+
+client.println("function fetchData(){");
+client.println("fetch('/data').then(r=>r.json()).then(updateUI);");
+client.println("}");
+
+client.println("function setMode(m){");
+client.println("fetch('/data?mode='+m).then(fetchData);");
+client.println("}");
+
+client.println("function updateManual(){");
+client.println("let A=document.getElementById('A').value;");
+client.println("let B=document.getElementById('B').value;");
+client.println("let C=document.getElementById('C').value;");
+client.println("fetch(`/data?A=${A}&B=${B}&C=${C}`).then(fetchData);");
+client.println("}");
+
+client.println("setInterval(fetchData,2000);");
+client.println("fetchData();");
+
+client.println("</script>");
+
+client.println("</body>");
+client.println("</html>");
+  delay(1);
   client.stop();
 }
